@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Whereabouts | Live Telemetry Pipeline Viewer</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    
+    <style>
+        body { 
+            margin: 0; 
+            padding: 0; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            background: #1a1a1a;
+            color: #f5f5f5;
+        }
+        #map { 
+            height: 100vh; 
+            width: 100vw; 
+            z-index: 1; 
+        }
+        
+        /* Popup Styling Re-engineered */
+        .custom-popup .leaflet-popup-content-wrapper {
+            background: rgba(30, 30, 30, 0.95);
+            color: #fff;
+            border-radius: 8px;
+            border: 1px solid #444;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        }
+        .custom-popup .leaflet-popup-tip {
+            background: rgba(30, 30, 30, 0.95);
+        }
+        .custom-popup h3 { 
+            margin: 0 0 8px 0; 
+            color: #007bff; 
+            font-size: 16px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 4px;
+        }
+        .custom-popup p { 
+            margin: 4px 0; 
+            font-size: 13px; 
+            color: #ccc; 
+        }
+        .custom-popup strong {
+            color: #fff;
+        }
+        
+        /* Enterprise Overlay Layouts */
+        .pipeline-note { 
+            background: rgba(255, 193, 7, 0.15); 
+            color: #ffc107; 
+            padding: 8px; 
+            border-radius: 4px; 
+            font-size: 11px; 
+            margin-top: 8px; 
+            font-weight: bold; 
+            border: 1px solid rgba(255, 193, 7, 0.3);
+            line-height: 1.4;
+        }
+        .pipeline-status { 
+            position: absolute; 
+            top: 10px; 
+            right: 10px; 
+            z-index: 1000; 
+            background: rgba(20, 20, 20, 0.9); 
+            color: #00ff66;
+            padding: 12px 18px; 
+            border-radius: 6px; 
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5); 
+            font-size: 12px; 
+            font-weight: bold; 
+            font-family: monospace;
+            border: 1px solid #333;
+            letter-spacing: 0.5px;
+        }
+        
+        /* Control Input Overlay Panel */
+        .target-injector-panel { 
+            position: absolute; 
+            top: 10px; 
+            left: 50px; 
+            z-index: 1000; 
+            background: rgba(255, 255, 255, 0.95); 
+            padding: 10px; 
+            border-radius: 6px; 
+            box-shadow: 0 4px 15px rgba(0,0,0,0.4); 
+            display: flex; 
+            gap: 8px; 
+            align-items: center; 
+        }
+        .target-injector-panel input { 
+            width: 300px; 
+            padding: 8px; 
+            border: 1px solid #ccc; 
+            border-radius: 4px; 
+            font-family: monospace; 
+            font-size: 12px; 
+            background: #fff;
+            color: #000;
+        }
+        .target-injector-panel button { 
+            padding: 8px 16px; 
+            background: #007bff; 
+            color: white; 
+            border: none; 
+            border-radius: 4px; 
+            font-weight: bold; 
+            cursor: pointer; 
+            font-size: 12px; 
+            transition: background 0.2s ease;
+        }
+        .target-injector-panel button:hover { 
+            background: #0056b3; 
+        }
+    </style>
+</head>
+<body>
+
+    <div class="target-injector-panel">
+        <input type="text" id="manual-tracking-id" placeholder="Enter Tracking UUID (e.g., 3601a25e...)" />
+        <button onclick="injectTrackingTarget()">Track Scan</button>
+    </div>
+
+    <div id="pipeline-status" class="pipeline-status">📡 INITIALIZING TELEMETRY ENGINE...</div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        let targetTrackingId = urlParams.get('id'); 
+        
+        // ARCHITECTURAL OPTIMIZATION: Resolves relative to the backend server origin automatically
+        const API_BASE_URL = window.location.origin === "file://" 
+            ? "http://127.0.0.1:8000/api/v1/scanner" 
+            : `${window.location.origin}/api/v1/scanner`;
+
+        const statusIndicator = document.getElementById("pipeline-status");
+        const inputField = document.getElementById("manual-tracking-id");
+
+        if (targetTrackingId) {
+            inputField.value = targetTrackingId;
+        }
+
+        // Initialize global map view
+        const map = L.map('map').setView([20.0, 0.0], 2);
+        
+        // Dark canvas tile set matching high-performance intelligence dashboards
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors © CARTO'
+        }).addTo(map);
+
+        let currentMarker = null;
+        let currentCircle = null;
+        let activeQueryId = null;
+
+        function injectTrackingTarget() {
+            const rawInput = inputField.value.trim();
+            if (!rawInput) {
+                alert("Please enter a valid tracking token UUID.");
+                return;
+            }
+            targetTrackingId = rawInput;
+            
+            // Push tracking parameters to the address bar without triggering a reload
+            const newUrl = `${window.location.protocol}//${window.location.host}${window.location.pathname}?id=${targetTrackingId}`;
+            window.history.pushState({ path: newUrl }, '', newUrl);
+            
+            monitorPipeline();
+        }
+
+        async function monitorPipeline() {
+            if (!targetTrackingId) {
+                statusIndicator.innerText = "🛑 AWAITING TRACKING TOKEN INPUT...";
+                statusIndicator.style.color = "#ffc107";
+                return;
+            }
+
+            try {
+                let fetchUrl = `${API_BASE_URL}/scans/${targetTrackingId}/geojson`;
+                statusIndicator.innerText = "🔄 POLLING ASYNC DATABASE CORE...";
+                statusIndicator.style.color = "#00bcff";
+                
+                const response = await fetch(fetchUrl);
+                
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        statusIndicator.innerText = "⏳ WORKER POOL PROCESSING PAYLOAD...";
+                        statusIndicator.style.color = "#ffc107";
+                        return;
+                    }
+                    throw new Error("Pipeline link network degradation exception.");
+                }
+                
+                const geojsonData = await response.json();
+                if (!geojsonData.geometry || !geojsonData.geometry.coordinates) {
+                    statusIndicator.innerText = "⚠️ INVALID COORDINATE PAYLOAD DETECTED.";
+                    statusIndicator.style.color = "#dc3545";
+                    return;
+                }
+
+                const lng = geojsonData.geometry.coordinates[0];
+                const lat = geojsonData.geometry.coordinates[1];
+                const props = geojsonData.properties;
+
+                if (activeQueryId === props.tracking_id && currentMarker) {
+                    statusIndicator.innerText = "🟢 TELEMETRY LINK LOCKED & SYNCHRONIZED";
+                    statusIndicator.style.color = "#00ff66";
+                    return;
+                }
+
+                if (currentMarker) map.removeLayer(currentMarker);
+                if (currentCircle) map.removeLayer(currentCircle);
+
+                activeQueryId = props.tracking_id;
+                statusIndicator.innerText = `🎯 TARGET LOCKED: ${activeQueryId.substring(0,8).toUpperCase()}`;
+                statusIndicator.style.color = "#00ff66";
+
+                currentMarker = L.marker([lat, lng]).addTo(map);
+                
+                let logs = props.evidence_logs || {};
+                let deductionChain = logs.logical_deduction_chain || "No logic chain generated by the model.";
+                let flora = logs.detected_foliage || "Unknown Flora Context";
+                let style = logs.architectural_era || "Unknown Structural Style";
+
+                let noteHtml = `<div class="pipeline-note"><strong>Deduction Chain:</strong> ${deductionChain}</div>`;
+
+                currentMarker.bindPopup(`
+                    <div class="custom-popup">
+                        <h3>Pipeline Telemetry Acquired</h3>
+                        <p><strong>Tracking Key:</strong> ${props.tracking_id}</p>
+                        <p><strong>Confidence:</strong> ${(props.confidence * 100).toFixed(2)}%</p>
+                        <p><strong>Accuracy Limit:</strong> ±${props.accuracy_radius} meters</p>
+                        <p><strong>Flora Context:</strong> ${flora}</p>
+                        <p><strong>Structural Context:</strong> ${style}</p>
+                        ${noteHtml}
+                    </div>
+                `, { className: 'custom-popup' }).openPopup();
+
+                currentCircle = L.circle([lat, lng], {
+                    radius: props.accuracy_radius,
+                    color: '#007bff',
+                    fillColor: '#007bff',
+                    fillOpacity: 0.12,
+                    weight: 2
+                }).addTo(map);
+
+                map.setView([lat, lng], 14);
+
+            } catch (error) {
+                console.error("Telemetry Pipeline Failure:", error);
+                statusIndicator.innerText = "❌ TELEMETRY LINK OFFLINE";
+                statusIndicator.style.color = "#dc3545";
+            }
+        }
+
+        setInterval(monitorPipeline, 4000);
+        monitorPipeline();
+    </script>
+</body>
+</html>
